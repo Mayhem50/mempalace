@@ -25,6 +25,7 @@ os.environ["HOME"] = _session_tmp
 os.environ["USERPROFILE"] = _session_tmp
 os.environ["HOMEDRIVE"] = os.path.splitdrive(_session_tmp)[0] or "C:"
 os.environ["HOMEPATH"] = os.path.splitdrive(_session_tmp)[1] or _session_tmp
+os.environ.setdefault("MEMPALACE_PATTERN_EXTRACTION_MODE", "heuristic")
 
 # Now it is safe to import mempalace modules that trigger initialisation.
 import chromadb  # noqa: E402
@@ -44,6 +45,10 @@ def _reset_mcp_cache():
 
             mcp_server._client_cache = None
             mcp_server._collection_cache = None
+            if getattr(mcp_server, "_pattern_store", None) is not None:
+                mcp_server._pattern_store.close()
+            mcp_server._pattern_store = None
+            mcp_server._pattern_store_path = None
         except (ImportError, AttributeError):
             pass
 

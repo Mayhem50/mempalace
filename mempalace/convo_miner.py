@@ -17,6 +17,7 @@ from collections import defaultdict
 
 from .normalize import normalize
 from .palace import SKIP_DIRS, get_collection, file_already_mined
+from .pattern_labels import PatternExtractor, PatternLabelStore, extract_and_store_labels
 
 
 # File types that might contain conversations
@@ -224,6 +225,92 @@ def scan_convos(convo_dir: str) -> list:
     return files
 
 
+def _get_existing_drawer_ids(collection, source_file: str) -> list:
+    try:
+        existing = collection.get(where={"source_file": source_file}, limit=10000)
+        return existing.get("ids", [])
+    except Exception:
+        return []
+
+
+def _report_dry_run(
+    filepath_name: str, chunks: list, extract_mode: str, room: str, room_counts: dict
+):
+    if extract_mode == "general":
+        from collections import Counter
+
+        type_counts = Counter(c.get("memory_type", "general") for c in chunks)
+        types_str = ", ".join(
+            f"{chunk_type}:{count}" for chunk_type, count in type_counts.most_common()
+        )
+        print(f"    [DRY RUN] {filepath_name} → {len(chunks)} memories ({types_str})")
+        for chunk in chunks:
+            room_counts[chunk.get("memory_type", "general")] += 1
+        return
+
+    print(f"    [DRY RUN] {filepath_name} → room:{room} ({len(chunks)} drawers)")
+    room_counts[room] += 1
+
+
+def _clear_existing_source(collection, pattern_store, source_file: str, existing_ids: list):
+    try:
+        collection.delete(where={"source_file": source_file})
+    except Exception:
+        pass
+
+    for existing_id in existing_ids:
+        pattern_store.delete_labels(existing_id)
+
+
+def _store_chunks(
+    collection,
+    pattern_store,
+    pattern_extractor,
+    chunks: list,
+    source_file: str,
+    wing: str,
+    room: str,
+    agent: str,
+    extract_mode: str,
+    room_counts: dict,
+) -> int:
+    drawers_added = 0
+    for chunk in chunks:
+        chunk_room = chunk.get("memory_type", room) if extract_mode == "general" else room
+        if extract_mode == "general":
+            room_counts[chunk_room] += 1
+        drawer_id = f"drawer_{wing}_{chunk_room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
+        collection.upsert(
+            documents=[chunk["content"]],
+            ids=[drawer_id],
+            metadatas=[
+                {
+                    "wing": wing,
+                    "room": chunk_room,
+                    "source_file": source_file,
+                    "chunk_index": chunk["chunk_index"],
+                    "added_by": agent,
+                    "filed_at": datetime.now().isoformat(),
+                    "ingest_mode": "convos",
+                    "extract_mode": extract_mode,
+                }
+            ],
+        )
+        extract_and_store_labels(
+            pattern_store,
+            pattern_extractor,
+            drawer_id,
+            chunk["content"],
+            {
+                "wing": wing,
+                "room": chunk_room,
+                "source_file": source_file,
+            },
+        )
+        drawers_added += 1
+    return drawers_added
+
+
 # =============================================================================
 # MINE CONVERSATIONS
 # =============================================================================
@@ -265,6 +352,8 @@ def mine_convos(
     print(f"{'-' * 55}\n")
 
     collection = get_collection(palace_path) if not dry_run else None
+    pattern_store = PatternLabelStore.for_palace(palace_path) if not dry_run else None
+    pattern_extractor = PatternExtractor() if not dry_run else None
 
     total_drawers = 0
     files_skipped = 0
@@ -277,6 +366,8 @@ def mine_convos(
         if not dry_run and file_already_mined(collection, source_file):
             files_skipped += 1
             continue
+
+        existing_ids = _get_existing_drawer_ids(collection, source_file) if not dry_run else []
 
         # Normalize format
         try:
@@ -306,54 +397,28 @@ def mine_convos(
             room = None  # set per-chunk below
 
         if dry_run:
-            if extract_mode == "general":
-                from collections import Counter
-
-                type_counts = Counter(c.get("memory_type", "general") for c in chunks)
-                types_str = ", ".join(f"{t}:{n}" for t, n in type_counts.most_common())
-                print(f"    [DRY RUN] {filepath.name} → {len(chunks)} memories ({types_str})")
-            else:
-                print(f"    [DRY RUN] {filepath.name} → room:{room} ({len(chunks)} drawers)")
+            _report_dry_run(filepath.name, chunks, extract_mode, room, room_counts)
             total_drawers += len(chunks)
-            # Track room counts
-            if extract_mode == "general":
-                for c in chunks:
-                    room_counts[c.get("memory_type", "general")] += 1
-            else:
-                room_counts[room] += 1
             continue
 
         if extract_mode != "general":
             room_counts[room] += 1
 
+        _clear_existing_source(collection, pattern_store, source_file, existing_ids)
+
         # File each chunk
-        drawers_added = 0
-        for chunk in chunks:
-            chunk_room = chunk.get("memory_type", room) if extract_mode == "general" else room
-            if extract_mode == "general":
-                room_counts[chunk_room] += 1
-            drawer_id = f"drawer_{wing}_{chunk_room}_{hashlib.sha256((source_file + str(chunk['chunk_index'])).encode()).hexdigest()[:24]}"
-            try:
-                collection.upsert(
-                    documents=[chunk["content"]],
-                    ids=[drawer_id],
-                    metadatas=[
-                        {
-                            "wing": wing,
-                            "room": chunk_room,
-                            "source_file": source_file,
-                            "chunk_index": chunk["chunk_index"],
-                            "added_by": agent,
-                            "filed_at": datetime.now().isoformat(),
-                            "ingest_mode": "convos",
-                            "extract_mode": extract_mode,
-                        }
-                    ],
-                )
-                drawers_added += 1
-            except Exception as e:
-                if "already exists" not in str(e).lower():
-                    raise
+        drawers_added = _store_chunks(
+            collection,
+            pattern_store,
+            pattern_extractor,
+            chunks,
+            source_file,
+            wing,
+            room,
+            agent,
+            extract_mode,
+            room_counts,
+        )
 
         total_drawers += drawers_added
         print(f"  ✓ [{i:4}/{len(files)}] {filepath.name[:50]:50} +{drawers_added}")
@@ -369,6 +434,9 @@ def mine_convos(
             print(f"    {room:20} {count} files")
     print('\n  Next: mempalace search "what you\'re looking for"')
     print(f"{'=' * 55}\n")
+
+    if pattern_store is not None:
+        pattern_store.close()
 
 
 if __name__ == "__main__":

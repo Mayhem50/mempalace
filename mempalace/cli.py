@@ -523,7 +523,7 @@ def main():
         help="Output skill instructions to stdout",
     )
     instructions_sub = p_instructions.add_subparsers(dest="instructions_name")
-    for instr_name in ["init", "search", "mine", "help", "status"]:
+    for instr_name in ["init", "search", "mine", "help", "status", "patterns"]:
         instructions_sub.add_parser(instr_name, help=f"Output {instr_name} instructions")
 
     # repair
