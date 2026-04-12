@@ -18,6 +18,7 @@ from collections import defaultdict
 import chromadb
 
 from .palace import SKIP_DIRS, get_collection, file_already_mined
+from .pattern_labels import PatternExtractor, PatternLabelStore, extract_and_store_labels
 
 READABLE_EXTENSIONS = {
     ".txt",
@@ -371,7 +372,15 @@ def chunk_text(content: str, source_file: str) -> list:
 
 
 def add_drawer(
-    collection, wing: str, room: str, content: str, source_file: str, chunk_index: int, agent: str
+    collection,
+    wing: str,
+    room: str,
+    content: str,
+    source_file: str,
+    chunk_index: int,
+    agent: str,
+    pattern_store: PatternLabelStore = None,
+    pattern_extractor: PatternExtractor = None,
 ):
     """Add one drawer to the palace."""
     drawer_id = f"drawer_{wing}_{room}_{hashlib.sha256((source_file + str(chunk_index)).encode()).hexdigest()[:24]}"
@@ -394,6 +403,8 @@ def add_drawer(
             ids=[drawer_id],
             metadatas=[metadata],
         )
+        if pattern_store is not None and pattern_extractor is not None:
+            extract_and_store_labels(pattern_store, pattern_extractor, drawer_id, content, metadata)
         return True
     except Exception:
         raise
@@ -412,6 +423,8 @@ def process_file(
     rooms: list,
     agent: str,
     dry_run: bool,
+    pattern_store: PatternLabelStore = None,
+    pattern_extractor: PatternExtractor = None,
 ) -> tuple:
     """Read, chunk, route, and file one file. Returns (drawer_count, room_name)."""
 
@@ -441,10 +454,21 @@ def process_file(
     # hnswlib's thread-unsafe updatePoint path and can segfault on macOS ARM
     # with chromadb 0.6.3) into a clean delete+insert, bypassing the update
     # path entirely.
+    existing_ids = []
+    try:
+        existing = collection.get(where={"source_file": source_file}, limit=10000)
+        existing_ids = existing.get("ids", [])
+    except Exception:
+        existing_ids = []
+
     try:
         collection.delete(where={"source_file": source_file})
     except Exception:
         pass
+
+    if pattern_store is not None:
+        for existing_id in existing_ids:
+            pattern_store.delete_labels(existing_id)
 
     drawers_added = 0
     for chunk in chunks:
@@ -456,6 +480,8 @@ def process_file(
             source_file=source_file,
             chunk_index=chunk["chunk_index"],
             agent=agent,
+            pattern_store=pattern_store,
+            pattern_extractor=pattern_extractor,
         )
         if added:
             drawers_added += 1
@@ -580,8 +606,12 @@ def mine(
 
     if not dry_run:
         collection = get_collection(palace_path)
+        pattern_store = PatternLabelStore.for_palace(palace_path)
+        pattern_extractor = PatternExtractor()
     else:
         collection = None
+        pattern_store = None
+        pattern_extractor = None
 
     total_drawers = 0
     files_skipped = 0
@@ -596,6 +626,8 @@ def mine(
             rooms=rooms,
             agent=agent,
             dry_run=dry_run,
+            pattern_store=pattern_store,
+            pattern_extractor=pattern_extractor,
         )
         if drawers == 0 and not dry_run:
             files_skipped += 1
@@ -615,6 +647,9 @@ def mine(
         print(f"    {room:20} {count} files")
     print('\n  Next: mempalace search "what you\'re looking for"')
     print(f"{'=' * 55}\n")
+
+    if pattern_store is not None:
+        pattern_store.close()
 
 
 # =============================================================================

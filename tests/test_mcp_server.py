@@ -8,6 +8,8 @@ via monkeypatch to avoid touching real data.
 
 import json
 
+from mempalace.pattern_labels import PatternLabelStore
+
 
 def _patch_mcp_server(monkeypatch, config, kg):
     """Patch the mcp_server module globals to use test fixtures."""
@@ -102,6 +104,10 @@ class TestHandleRequest:
         assert "mempalace_search" in names
         assert "mempalace_add_drawer" in names
         assert "mempalace_kg_add" in names
+        assert "mempalace_search_pattern" in names
+        assert "mempalace_search_pattern_clean" in names
+        assert "mempalace_label_episode" in names
+        assert "mempalace_list_patterns" in names
 
     def test_null_arguments_does_not_hang(self, monkeypatch, config, palace_path, seeded_kg):
         """Sending arguments: null should return a result, not hang (#394)."""
@@ -222,6 +228,225 @@ class TestReadTools:
         result = tool_status()
         assert "error" in result
 
+    def test_list_patterns(self, monkeypatch, config, palace_path, seeded_collection, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_list_patterns, tool_label_episode
+
+        tool_label_episode("drawer_proj_backend_aaa")
+        result = tool_list_patterns()
+        assert result["episodes_labeled"] == 1
+        assert "causal_pattern" in result["dimensions"]
+        assert "workstream" in result["dimensions"]
+        assert "artifact_type" in result["dimensions"]
+
+    def test_search_pattern(self, monkeypatch, config, palace_path, seeded_collection, kg):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_label_episode, tool_search_pattern
+
+        tool_label_episode("drawer_proj_backend_aaa")
+        result = tool_search_pattern(causal_pattern="auth_failure", workstream="debugging")
+        assert result["count"] >= 1
+        assert result["results"][0]["episode_id"] == "drawer_proj_backend_aaa"
+        assert result["results"][0]["aaak_summary"]
+        assert result["results"][0]["labels"]["workstream"] == "debugging"
+        assert result["results"][0]["labels"]["artifact_type"] == "source_code"
+
+    def test_search_pattern_excludes_artifact_type(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_search_pattern
+
+        store = PatternLabelStore.for_palace(palace_path)
+        store.upsert_labels(
+            "drawer_proj_backend_aaa",
+            {
+                "causal_pattern": "auth_failure",
+                "temporal_dynamic": "intermittent",
+                "topology": "single_component",
+                "resolution_strategy": "isolate_reproduce_fix",
+                "severity": "degradation",
+                "confidence": "verified",
+                "workstream": "ux_iteration",
+                "change_kind": "redesign",
+                "product_surface": "onboarding_activation",
+                "primary_constraint": "usability",
+                "decision_driver": "user_feedback",
+                "artifact_type": "configuration",
+            },
+            source_wing="project",
+            source_room="backend",
+        )
+        result = tool_search_pattern(
+            wing="project",
+            workstream="ux_iteration",
+            artifact_type_exclude="configuration",
+        )
+        assert result["count"] == 0
+        store.close()
+
+    def test_search_pattern_includes_artifact_type(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_search_pattern
+
+        store = PatternLabelStore.for_palace(palace_path)
+        store.upsert_labels(
+            "drawer_proj_backend_aaa",
+            {
+                "workstream": "ux_iteration",
+                "product_surface": "onboarding_activation",
+                "artifact_type": "configuration",
+            },
+            source_wing="project",
+            source_room="backend",
+        )
+        result = tool_search_pattern(
+            wing="project",
+            workstream="ux_iteration",
+            artifact_type_include="configuration",
+        )
+        assert result["count"] == 1
+        assert result["results"][0]["labels"]["artifact_type"] == "configuration"
+        store.close()
+
+    def test_search_pattern_ranks_documentation_before_configuration_for_ux(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_search_pattern
+
+        _client, col = _get_collection(palace_path, create=True)
+        col.upsert(
+            ids=["drawer_doc", "drawer_cfg"],
+            documents=["onboarding journey documentation", "storybook onboarding configuration"],
+            metadatas=[
+                {
+                    "wing": "project",
+                    "room": "frontend",
+                    "source_file": "/tmp/README.md",
+                    "filed_at": "2026-01-01T00:00:00",
+                },
+                {
+                    "wing": "project",
+                    "room": "frontend",
+                    "source_file": "/tmp/package.json",
+                    "filed_at": "2026-01-02T00:00:00",
+                },
+            ],
+        )
+        del _client
+
+        store = PatternLabelStore.for_palace(palace_path)
+        store.upsert_labels(
+            "drawer_cfg",
+            {
+                "workstream": "ux_iteration",
+                "product_surface": "onboarding_activation",
+                "artifact_type": "configuration",
+            },
+            source_wing="project",
+            source_room="frontend",
+            extracted_at="2026-01-02T00:00:00",
+        )
+        store.upsert_labels(
+            "drawer_doc",
+            {
+                "workstream": "ux_iteration",
+                "product_surface": "onboarding_activation",
+                "artifact_type": "documentation",
+            },
+            source_wing="project",
+            source_room="frontend",
+            extracted_at="2026-01-01T00:00:00",
+        )
+        result = tool_search_pattern(
+            wing="project",
+            workstream="ux_iteration",
+            product_surface="onboarding_activation",
+            limit=2,
+        )
+        assert result["results"][0]["episode_id"] == "drawer_doc"
+        assert result["results"][0]["labels"]["artifact_type"] == "documentation"
+        assert result["results"][1]["labels"]["artifact_type"] == "configuration"
+        store.close()
+
+    def test_search_pattern_clean_excludes_noisy_artifacts(
+        self, monkeypatch, config, palace_path, seeded_collection, kg
+    ):
+        _patch_mcp_server(monkeypatch, config, kg)
+        from mempalace.mcp_server import tool_search_pattern_clean
+
+        _client, col = _get_collection(palace_path, create=True)
+        col.upsert(
+            ids=["drawer_doc_clean", "drawer_cfg_clean", "drawer_agent_clean"],
+            documents=["clean doc", "clean cfg", "clean agent"],
+            metadatas=[
+                {
+                    "wing": "project",
+                    "room": "documentation",
+                    "source_file": "/tmp/README.md",
+                    "filed_at": "2026-01-03T00:00:00",
+                },
+                {
+                    "wing": "project",
+                    "room": "frontend",
+                    "source_file": "/tmp/package.json",
+                    "filed_at": "2026-01-02T00:00:00",
+                },
+                {
+                    "wing": "project",
+                    "room": "backend",
+                    "source_file": "/tmp/AGENT.md",
+                    "filed_at": "2026-01-01T00:00:00",
+                },
+            ],
+        )
+        del _client
+
+        store = PatternLabelStore.for_palace(palace_path)
+        store.upsert_labels(
+            "drawer_doc_clean",
+            {
+                "workstream": "ux_iteration",
+                "product_surface": "onboarding_activation",
+                "artifact_type": "documentation",
+            },
+            source_wing="project",
+            source_room="documentation",
+        )
+        store.upsert_labels(
+            "drawer_cfg_clean",
+            {
+                "workstream": "ux_iteration",
+                "product_surface": "onboarding_activation",
+                "artifact_type": "configuration",
+            },
+            source_wing="project",
+            source_room="frontend",
+        )
+        store.upsert_labels(
+            "drawer_agent_clean",
+            {
+                "workstream": "ux_iteration",
+                "product_surface": "onboarding_activation",
+                "artifact_type": "agent_guide",
+            },
+            source_wing="project",
+            source_room="backend",
+        )
+
+        result = tool_search_pattern_clean(
+            wing="project",
+            workstream="ux_iteration",
+            product_surface="onboarding_activation",
+            limit=5,
+        )
+        artifact_types = [row["labels"]["artifact_type"] for row in result["results"]]
+        assert artifact_types == ["documentation"]
+        store.close()
+
 
 # ── Search Tool ─────────────────────────────────────────────────────────
 
@@ -261,7 +486,7 @@ class TestWriteTools:
         _patch_mcp_server(monkeypatch, config, kg)
         _client, _col = _get_collection(palace_path, create=True)
         del _client
-        from mempalace.mcp_server import tool_add_drawer
+        from mempalace.mcp_server import tool_add_drawer, tool_list_patterns
 
         result = tool_add_drawer(
             wing="test_wing",
@@ -272,6 +497,8 @@ class TestWriteTools:
         assert result["wing"] == "test_wing"
         assert result["room"] == "test_room"
         assert result["drawer_id"].startswith("drawer_test_wing_test_room_")
+        patterns = tool_list_patterns()
+        assert patterns["episodes_labeled"] == 1
 
     def test_add_drawer_duplicate_detection(self, monkeypatch, config, palace_path, kg):
         _patch_mcp_server(monkeypatch, config, kg)
@@ -289,11 +516,14 @@ class TestWriteTools:
 
     def test_delete_drawer(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)
-        from mempalace.mcp_server import tool_delete_drawer
+        from mempalace.mcp_server import tool_delete_drawer, tool_label_episode, tool_list_patterns
+
+        tool_label_episode("drawer_proj_backend_aaa")
 
         result = tool_delete_drawer("drawer_proj_backend_aaa")
         assert result["success"] is True
         assert seeded_collection.count() == 3
+        assert tool_list_patterns()["episodes_labeled"] == 0
 
     def test_delete_drawer_not_found(self, monkeypatch, config, palace_path, seeded_collection, kg):
         _patch_mcp_server(monkeypatch, config, kg)

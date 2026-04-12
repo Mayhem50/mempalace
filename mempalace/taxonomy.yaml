@@ -1,0 +1,161 @@
+causal_pattern:
+  - resource_leak
+  - missing_validation
+  - race_condition
+  - config_conflict
+  - state_desync
+  - dependency_break
+  - auth_failure
+  - silent_error
+  - interface_mismatch
+  - hidden_coupling
+  - incorrect_assumption
+  - observability_gap
+  - capacity_limit
+  - data_quality_issue
+  - workflow_gap
+  - user_friction
+  - unclear_requirements
+  - prioritization_gap
+  - coordination_gap
+  - opportunity_gap
+
+temporal_dynamic:
+  - immediate
+  - progressive
+  - intermittent
+  - event_triggered
+  - delayed
+  - recurring
+  - cascading
+  - long_running
+  - deadline_driven
+  - release_bound
+
+topology:
+  - single_component
+  - linear_chain
+  - circular
+  - fan_out
+  - cross_service
+  - cross_repo
+  - multi_layer
+  - data_pipeline
+  - control_plane
+  - user_journey
+  - multi_actor
+  - platform_surface
+
+resolution_strategy:
+  - isolate_reproduce_fix
+  - workaround_then_fix
+  - rollback
+  - refactor
+  - config_change
+  - upstream_fix
+  - instrument_then_iterate
+  - prototype_and_validate
+  - simplify_scope
+  - redesign_flow
+  - align_stakeholders
+  - document_and_enable
+  - automate_and_guardrail
+
+severity:
+  - blocker
+  - critical
+  - major
+  - degradation
+  - minor
+  - cosmetic
+  - strategic
+  - security
+  - compliance
+  - opportunity
+
+confidence:
+  - verified
+  - probable
+  - mixed_signal
+  - hypothesis
+  - exploratory
+
+workstream:
+  - debugging
+  - feature_delivery
+  - refactor
+  - architecture
+  - migration
+  - performance
+  - developer_experience
+  - research
+  - product_discovery
+  - product_strategy
+  - ux_iteration
+  - release_operations
+
+change_kind:
+  - fix
+  - add
+  - improve
+  - redesign
+  - simplify
+  - migrate
+  - validate
+  - automate
+  - document
+  - decide
+
+product_surface:
+  - backend_system
+  - frontend_ui
+  - api_contract
+  - data_model
+  - infra_platform
+  - developer_workflow
+  - onboarding_activation
+  - core_user_flow
+  - admin_operations
+  - analytics_instrumentation
+  - monetization_pricing
+  - retention_engagement
+  - collaboration_workflow
+
+primary_constraint:
+  - correctness
+  - reliability
+  - performance
+  - security
+  - usability
+  - maintainability
+  - scalability
+  - cost
+  - delivery_speed
+  - compliance
+  - adoption
+
+decision_driver:
+  - incident_signal
+  - user_feedback
+  - metric_signal
+  - stakeholder_request
+  - strategic_bet
+  - technical_constraint
+  - market_signal
+  - team_capacity
+  - regulatory_need
+  - competitive_pressure
+
+artifact_type:
+  - source_code
+  - test_code
+  - configuration
+  - documentation
+  - specification
+  - plan
+  - agent_guide
+  - schema
+  - script
+  - template
+  - generated_asset
+  - dataset

@@ -83,10 +83,10 @@ def test_cmd_search_error_exits(mock_config_cls):
 
 
 def test_cmd_instructions_calls_run_instructions():
-    args = argparse.Namespace(name="help")
+    args = argparse.Namespace(name="patterns")
     with patch("mempalace.instructions_cli.run_instructions") as mock_run:
         cmd_instructions(args)
-        mock_run.assert_called_once_with(name="help")
+        mock_run.assert_called_once_with(name="patterns")
 
 
 # ── cmd_hook ───────────────────────────────────────────────────────────

@@ -31,9 +31,17 @@ from .version import __version__
 from .query_sanitizer import sanitize_query
 from .searcher import search_memories
 from .palace_graph import traverse, find_tunnels, graph_stats
+from .dialect import Dialect
 import chromadb
 
 from .knowledge_graph import KnowledgeGraph
+from .pattern_labels import (
+    PATTERN_DIMENSIONS,
+    PatternExtractor,
+    PatternLabelStore,
+    extract_and_store_labels,
+    fetch_drawer,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 logger = logging.getLogger("mempalace_mcp")
@@ -62,6 +70,96 @@ if _args.palace:
     _kg = KnowledgeGraph(db_path=os.path.join(_config.palace_path, "knowledge_graph.sqlite3"))
 else:
     _kg = KnowledgeGraph()
+_pattern_store = None
+_pattern_store_path = None
+_pattern_extractor = PatternExtractor()
+
+_WORKSTREAM_ARTIFACT_PRIORITIES = {
+    "debugging": [
+        "source_code",
+        "test_code",
+        "configuration",
+        "schema",
+        "documentation",
+        "plan",
+        "agent_guide",
+    ],
+    "feature_delivery": [
+        "source_code",
+        "specification",
+        "plan",
+        "test_code",
+        "documentation",
+        "configuration",
+        "agent_guide",
+    ],
+    "migration": [
+        "source_code",
+        "configuration",
+        "schema",
+        "plan",
+        "documentation",
+        "test_code",
+        "agent_guide",
+    ],
+    "architecture": [
+        "specification",
+        "plan",
+        "documentation",
+        "source_code",
+        "schema",
+        "agent_guide",
+    ],
+    "ux_iteration": [
+        "documentation",
+        "specification",
+        "plan",
+        "source_code",
+        "test_code",
+        "configuration",
+        "agent_guide",
+    ],
+    "product_discovery": [
+        "documentation",
+        "specification",
+        "plan",
+        "source_code",
+        "configuration",
+        "agent_guide",
+    ],
+    "product_strategy": [
+        "specification",
+        "plan",
+        "documentation",
+        "source_code",
+        "configuration",
+        "agent_guide",
+    ],
+    "developer_experience": [
+        "agent_guide",
+        "documentation",
+        "script",
+        "configuration",
+        "source_code",
+        "plan",
+        "specification",
+    ],
+}
+
+_DEFAULT_ARTIFACT_PRIORITY = [
+    "source_code",
+    "test_code",
+    "documentation",
+    "specification",
+    "plan",
+    "configuration",
+    "schema",
+    "script",
+    "template",
+    "agent_guide",
+    "dataset",
+    "generated_asset",
+]
 
 
 _client_cache = None
@@ -132,6 +230,17 @@ def _no_palace():
         "error": "No palace found",
         "hint": "Run: mempalace init <dir> && mempalace mine <dir>",
     }
+
+
+def _get_pattern_store():
+    global _pattern_store, _pattern_store_path
+    palace_path = _config.palace_path
+    if _pattern_store is None or _pattern_store_path != palace_path:
+        if _pattern_store is not None:
+            _pattern_store.close()
+        _pattern_store = PatternLabelStore.for_palace(palace_path)
+        _pattern_store_path = palace_path
+    return _pattern_store
 
 
 # ==================== READ TOOLS ====================
@@ -397,6 +506,189 @@ def tool_graph_stats():
     return graph_stats(col=col)
 
 
+def _artifact_rank(workstream: str = None, artifact_type: str = None) -> int:
+    ordered = _WORKSTREAM_ARTIFACT_PRIORITIES.get(workstream, _DEFAULT_ARTIFACT_PRIORITY)
+    if artifact_type in ordered:
+        return ordered.index(artifact_type)
+    return len(ordered) + 1
+
+
+def _sort_pattern_results(results: list[dict]) -> list[dict]:
+    return sorted(
+        results,
+        key=lambda item: (
+            item["artifact_rank"],
+            -(datetime.fromisoformat(item.get("filed_at", "1970-01-01T00:00:00")).timestamp()),
+        ),
+    )
+
+
+def _search_pattern_drawers(
+    limit: int = 10,
+    artifact_type_exclude=None,
+    artifact_type_include=None,
+    **filters,
+):
+    store = _get_pattern_store()
+    col = _get_collection()
+    if not col:
+        return _no_palace()
+
+    requested_workstream = filters.get("workstream")
+    excluded_artifacts = {
+        value for value in (artifact_type_exclude or []) if isinstance(value, str) and value.strip()
+    }
+    included_artifacts = {
+        value for value in (artifact_type_include or []) if isinstance(value, str) and value.strip()
+    }
+
+    rows = store.search(limit=max(limit * 5, 50), **filters)
+    dialect = Dialect()
+    results = []
+    for row in rows:
+        artifact_type = row.get("artifact_type")
+        if artifact_type in excluded_artifacts:
+            continue
+        if included_artifacts and artifact_type not in included_artifacts:
+            continue
+        drawer = fetch_drawer(col, row["episode_id"])
+        if drawer is None:
+            continue
+        metadata = drawer["metadata"]
+        summary = dialect.compress(drawer["content"], metadata=metadata)
+        results.append(
+            {
+                "episode_id": row["episode_id"],
+                "wing": metadata.get("wing", row.get("source_wing")),
+                "room": metadata.get("room", row.get("source_room")),
+                "source_file": metadata.get("source_file", ""),
+                "filed_at": metadata.get("filed_at", ""),
+                "labels": {dimension: row.get(dimension) for dimension in PATTERN_DIMENSIONS},
+                "aaak_summary": summary,
+                "excerpt": drawer["content"][:300],
+                "artifact_rank": _artifact_rank(requested_workstream, artifact_type),
+            }
+        )
+
+    trimmed = _sort_pattern_results(results)[:limit]
+    for item in trimmed:
+        item.pop("artifact_rank", None)
+    return trimmed
+
+
+def tool_search_pattern(
+    limit: int = 10,
+    wing: str = None,
+    room: str = None,
+    artifact_type_exclude=None,
+    artifact_type_include=None,
+    **pattern_filters,
+):
+    filters = {
+        **{dimension: pattern_filters.get(dimension) for dimension in PATTERN_DIMENSIONS},
+        "source_wing": wing,
+        "source_room": room,
+    }
+    exclude_values = artifact_type_exclude
+    if isinstance(exclude_values, str):
+        exclude_values = [exclude_values]
+    include_values = artifact_type_include
+    if isinstance(include_values, str):
+        include_values = [include_values]
+    results = _search_pattern_drawers(
+        limit=limit,
+        artifact_type_exclude=exclude_values,
+        artifact_type_include=include_values,
+        **filters,
+    )
+    if isinstance(results, dict) and results.get("error"):
+        return results
+    return {
+        "filters": filters,
+        "artifact_type_include": include_values or [],
+        "artifact_type_exclude": exclude_values or [],
+        "count": len(results),
+        "results": results,
+    }
+
+
+def tool_search_pattern_clean(
+    limit: int = 10, wing: str = None, room: str = None, **pattern_filters
+):
+    workstream = pattern_filters.get("workstream")
+    default_excludes = ["configuration", "agent_guide"]
+    if workstream in {"ux_iteration", "product_discovery", "product_strategy"}:
+        default_includes = ["documentation", "specification", "plan", "source_code"]
+    elif workstream in {"feature_delivery", "debugging", "migration", "architecture"}:
+        default_includes = [
+            "source_code",
+            "test_code",
+            "schema",
+            "specification",
+            "plan",
+            "documentation",
+        ]
+    else:
+        default_includes = [
+            "source_code",
+            "test_code",
+            "documentation",
+            "specification",
+            "plan",
+            "schema",
+            "script",
+        ]
+
+    return tool_search_pattern(
+        limit=limit,
+        wing=wing,
+        room=room,
+        artifact_type_include=default_includes,
+        artifact_type_exclude=default_excludes,
+        **pattern_filters,
+    )
+
+
+def tool_label_episode(drawer_id: str):
+    col = _get_collection()
+    if not col:
+        return _no_palace()
+
+    drawer = fetch_drawer(col, drawer_id)
+    if drawer is None:
+        return {"success": False, "error": f"Drawer not found: {drawer_id}"}
+
+    outcome = extract_and_store_labels(
+        _get_pattern_store(),
+        _pattern_extractor,
+        drawer_id,
+        drawer["content"],
+        drawer["metadata"],
+    )
+    return {
+        "success": True,
+        "drawer_id": drawer_id,
+        "source": outcome["source"],
+        "labels": outcome["labels"],
+    }
+
+
+def tool_list_patterns(dimension: str = None):
+    try:
+        data = _get_pattern_store().list_patterns(dimension=dimension)
+    except ValueError as e:
+        return {"error": str(e)}
+    if dimension:
+        data["dimension"] = dimension
+    return data
+
+
+_PATTERN_SEARCH_PROPERTIES = {
+    dimension: {"type": "string", "description": f"Filter by {dimension}"}
+    for dimension in PATTERN_DIMENSIONS
+}
+
+
 # ==================== WRITE TOOLS ====================
 
 
@@ -452,6 +744,17 @@ def tool_add_drawer(
                 }
             ],
         )
+        extract_and_store_labels(
+            _get_pattern_store(),
+            _pattern_extractor,
+            drawer_id,
+            content,
+            {
+                "wing": wing,
+                "room": room,
+                "source_file": source_file or "",
+            },
+        )
         logger.info(f"Filed drawer: {drawer_id} → {wing}/{room}")
         return {"success": True, "drawer_id": drawer_id, "wing": wing, "room": room}
     except Exception as e:
@@ -481,6 +784,7 @@ def tool_delete_drawer(drawer_id: str):
 
     try:
         col.delete(ids=[drawer_id])
+        _get_pattern_store().delete_labels(drawer_id)
         logger.info(f"Deleted drawer: {drawer_id}")
         return {"success": True, "drawer_id": drawer_id}
     except Exception as e:
@@ -831,6 +1135,70 @@ TOOLS = {
             "required": ["query"],
         },
         "handler": tool_search,
+    },
+    "mempalace_search_pattern": {
+        "description": "Search structural problem patterns by labels stored in SQLite",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                **_PATTERN_SEARCH_PROPERTIES,
+                "artifact_type_exclude": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                    "description": "Optional artifact types to exclude from results",
+                },
+                "artifact_type_include": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                    "description": "Optional artifact types to include in results",
+                },
+                "wing": {"type": "string", "description": "Optional wing filter"},
+                "room": {"type": "string", "description": "Optional room filter"},
+                "limit": {"type": "integer", "description": "Max results (default 10)"},
+            },
+        },
+        "handler": tool_search_pattern,
+    },
+    "mempalace_search_pattern_clean": {
+        "description": "Search structural patterns with cleaner artifact defaults that downrank or exclude noisy config and agent-guide files",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                **_PATTERN_SEARCH_PROPERTIES,
+                "wing": {"type": "string", "description": "Optional wing filter"},
+                "room": {"type": "string", "description": "Optional room filter"},
+                "limit": {"type": "integer", "description": "Max results (default 10)"},
+            },
+        },
+        "handler": tool_search_pattern_clean,
+    },
+    "mempalace_label_episode": {
+        "description": "Force structural label extraction for an existing drawer",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "drawer_id": {"type": "string", "description": "Existing drawer ID"},
+            },
+            "required": ["drawer_id"],
+        },
+        "handler": tool_label_episode,
+    },
+    "mempalace_list_patterns": {
+        "description": "List structural label values present in memory with counts",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "dimension": {
+                    "type": "string",
+                    "description": "Optional dimension name to restrict the output",
+                }
+            },
+        },
+        "handler": tool_list_patterns,
     },
     "mempalace_check_duplicate": {
         "description": "Check if content already exists in the palace before filing",

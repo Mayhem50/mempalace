@@ -8,6 +8,7 @@ import yaml
 
 from mempalace.miner import mine, scan_project
 from mempalace.palace import file_already_mined
+from mempalace.pattern_labels import PatternLabelStore
 
 
 def write_file(path: Path, content: str):
@@ -47,6 +48,10 @@ def test_project_mining():
         client = chromadb.PersistentClient(path=str(palace_path))
         col = client.get_collection("mempalace_drawers")
         assert col.count() > 0
+
+        store = PatternLabelStore.for_palace(str(palace_path))
+        assert store.list_patterns()["episodes_labeled"] == col.count()
+        store.close()
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
