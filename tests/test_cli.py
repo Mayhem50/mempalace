@@ -329,27 +329,31 @@ def test_main_split_dispatches():
 
 def test_mcp_command_prints_setup_guidance(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["mempalace", "mcp"])
+    monkeypatch.setattr(sys, "executable", "/tmp/venv/bin/python")
 
     main()
 
     captured = capsys.readouterr()
     assert "MemPalace MCP quick setup:" in captured.out
-    assert "claude mcp add mempalace -- python -m mempalace.mcp_server" in captured.out
+    assert (
+        "claude mcp add mempalace -- /tmp/venv/bin/python -m mempalace.mcp_server" in captured.out
+    )
     assert "\nOptional custom palace:\n" in captured.out
-    assert "python -m mempalace.mcp_server --palace /path/to/palace" in captured.out
+    assert "/tmp/venv/bin/python -m mempalace.mcp_server --palace /path/to/palace" in captured.out
     assert "[--palace /path/to/palace]" not in captured.out
     assert captured.err == ""
 
 
 def test_mcp_command_uses_custom_palace_path_when_provided(monkeypatch, capsys):
     monkeypatch.setattr(sys, "argv", ["mempalace", "--palace", "~/tmp/my palace", "mcp"])
+    monkeypatch.setattr(sys, "executable", "/tmp/venv path/bin/python")
 
     main()
 
     captured = capsys.readouterr()
     expanded = str(Path("~/tmp/my palace").expanduser())
 
-    assert "python -m mempalace.mcp_server --palace" in captured.out
+    assert "'/tmp/venv path/bin/python' -m mempalace.mcp_server --palace" in captured.out
     assert expanded in captured.out
     assert "Optional custom palace:" not in captured.out
     assert "[--palace /path/to/palace]" not in captured.out
@@ -546,10 +550,11 @@ def test_cmd_compress_dry_run(mock_config_cls, capsys):
     mock_dialect.compress.return_value = "compressed"
     mock_dialect.compression_stats.return_value = {
         "original_chars": 100,
-        "compressed_chars": 30,
-        "original_tokens": 25,
-        "compressed_tokens": 8,
-        "ratio": 3.3,
+        "summary_chars": 30,
+        "original_tokens_est": 25,
+        "summary_tokens_est": 8,
+        "size_ratio": 3.3,
+        "note": "Estimates only.",
     }
     mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
 
@@ -564,6 +569,7 @@ def test_cmd_compress_dry_run(mock_config_cls, capsys):
     out = capsys.readouterr().out
     assert "dry run" in out.lower()
     assert "Compressing" in out
+    assert "25t -> 8t (3.3x)" in out
 
 
 @patch("mempalace.cli.MempalaceConfig")
@@ -619,10 +625,11 @@ def test_cmd_compress_stores_results(mock_config_cls, capsys):
     mock_dialect.compress.return_value = "compressed"
     mock_dialect.compression_stats.return_value = {
         "original_chars": 100,
-        "compressed_chars": 30,
-        "original_tokens": 25,
-        "compressed_tokens": 8,
-        "ratio": 3.3,
+        "summary_chars": 30,
+        "original_tokens_est": 25,
+        "summary_tokens_est": 8,
+        "size_ratio": 3.3,
+        "note": "Estimates only.",
     }
     mock_dialect_mod = _make_mock_dialect_module(mock_dialect)
 
@@ -637,6 +644,9 @@ def test_cmd_compress_stores_results(mock_config_cls, capsys):
     out = capsys.readouterr().out
     assert "Stored" in out
     mock_comp_col.upsert.assert_called_once()
+    upsert_kwargs = mock_comp_col.upsert.call_args.kwargs
+    assert upsert_kwargs["metadatas"][0]["compression_ratio"] == 3.3
+    assert upsert_kwargs["metadatas"][0]["original_tokens"] == 25
 
 
 def test_cmd_repair_trailing_slash_does_not_recurse():
